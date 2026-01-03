@@ -1,0 +1,18 @@
+# build outputs
+server/server
+client/client
+*.o
+build/
+bin/
+
+# editor / nvim
+.nvim/
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# system
+.DS_Store
+
