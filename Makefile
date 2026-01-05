@@ -1,19 +1,24 @@
 CC=gcc
 CFLAGS=-Wall -Wextra -Werror -O2 -std=c11
-PTHREAD=-lpthread
 NCURSES=-lncurses
+PTHREAD=-lpthread
+
+SERVER_BIN=server/server
+CLIENT_BIN=client/client
 
 COMMON_SRC=common/net.c
 SERVER_SRC=server/server.c
 CLIENT_SRC=client/client.c
 
-all: server_bin client_bin
+.PHONY: all server client clean
 
-server_bin: $(SERVER_SRC) $(COMMON_SRC)
-	$(CC) $(CFLAGS) -o server/server $(SERVER_SRC) $(COMMON_SRC) $(PTHREAD)
+all: server client
 
-client_bin: $(CLIENT_SRC) $(COMMON_SRC)
-	$(CC) $(CFLAGS) -o client/client $(CLIENT_SRC) $(COMMON_SRC) $(NCURSES)
+server: $(SERVER_SRC) $(COMMON_SRC)
+	$(CC) $(CFLAGS) -o $(SERVER_BIN) $(SERVER_SRC) $(COMMON_SRC) $(PTHREAD)
+
+client: $(CLIENT_SRC) $(COMMON_SRC)
+	$(CC) $(CFLAGS) -o $(CLIENT_BIN) $(CLIENT_SRC) $(COMMON_SRC) $(NCURSES)
 
 clean:
-	rm -f server/server client/client *.o common/*.o server/*.o client/*.o
+	rm -f $(SERVER_BIN) $(CLIENT_BIN) common/*.o server/*.o client/*.o *.o
