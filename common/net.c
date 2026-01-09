@@ -74,9 +74,8 @@ int net_connect_tcp(const char *host, int port) {
     struct addrinfo *res = NULL;
     if (getaddrinfo(host, portstr, &hints, &res) != 0) return -1;
 
-    int fd = -1;
     for (struct addrinfo *p = res; p; p = p->ai_next) {
-        fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        int fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (fd < 0) continue;
 
         if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) {
@@ -84,7 +83,6 @@ int net_connect_tcp(const char *host, int port) {
             return fd;
         }
         close(fd);
-        fd = -1;
     }
 
     freeaddrinfo(res);

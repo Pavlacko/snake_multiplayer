@@ -11,355 +11,324 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/select.h>
-#include <unistd.h>
+#include <sys/wait.h>
 #include <time.h>
-
-#define DEFAULT_PORT 5555
-#define SERVER_INFO_FILE "server.info"
+#include <unistd.h>
 
 static volatile sig_atomic_t g_running = 1;
 
-static void on_sigint(int sig) {
-    (void)sig;
-    g_running = 0;
+static void on_sigint(int sig) { (void)sig; g_running = 0; }
+
+static void trim_nl(char *s) {
+    if (!s) return;
+    size_t n = strlen(s);
+    while (n > 0 && (s[n-1] == '\n' || s[n-1] == '\r')) { s[n-1] = 0; n--; }
 }
 
-static void sleep_ms(long ms) {
-    struct timespec ts;
-    ts.tv_sec = ms / 1000;
-    ts.tv_nsec = (ms % 1000) * 1000000L;
-    nanosleep(&ts, NULL);
-}
-
-static int parse_port(const char *s, int def_port) {
-    if (!s || !s[0]) return def_port;
-    int p = atoi(s);
-    if (p <= 0 || p > 65535) return def_port;
-    return p;
-}
-
-static int prompt_str(int y, int x, const char *label, char *out, size_t out_sz)
-{
-    if (!out || out_sz == 0) return -1;
-
-    out[0] = '\0';
-
-    mvprintw(y, x, "%s", label ? label : "");
-    clrtoeol();
-    refresh();
-
-    echo();
-    curs_set(1);
-
-    size_t len = 0;
-
-    for (;;) {
-        int ch = getch();
-
-        if (ch == 27) {                 
-            noecho();
-            curs_set(0);
-            out[0] = '\0';
-            return 1;                 
-        }
-
-        if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
-            break;                  
-        }
-
-        if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-            if (len > 0) {
-                len--;
-                out[len] = '\0';
-                int px = x + (int)strlen(label) + (int)len;
-                mvaddch(y, px, ' ');
-                move(y, px);
-                refresh();
-            }
-            continue;
-        }
-
-        if (ch == ERR) continue;
-        if (ch >= 32 && ch <= 126) {    
-            if (len + 1 < out_sz) {
-                out[len++] = (char)ch;
-                out[len] = '\0';
-                mvaddch(y, x + (int)strlen(label) + (int)len - 1, ch);
-                refresh();
-            }
-        }
+static void read_line(const char *prompt, char *out, size_t cap, const char *def) {
+    if (!out || cap == 0) return;
+    out[0] = 0;
+    if (prompt) {
+        printf("%s", prompt);
+        fflush(stdout);
     }
-
-    noecho();
-    curs_set(0);
-    return 0;                           
+    if (fgets(out, (int)cap, stdin) == NULL) {
+        out[0] = 0;
+        return;
+    }
+    trim_nl(out);
+    if (out[0] == 0 && def) (void)snprintf(out, cap, "%s", def);
 }
 
-static void fill_name(MsgHello *h, const char *name) {
-    memset(h, 0, sizeof(*h));
-    if (!name) return;
-    size_t n = strlen(name);
-    if (n > SNAKE_NAME_MAX) n = SNAKE_NAME_MAX;
-    memcpy(h->name, name, n);
-}
-
-static int do_handshake(int fd, const char *player_name, int *player_id_out) {
-    if (!player_id_out) return -1;
-
-    MsgHello hello;
-    fill_name(&hello, player_name);
-
-    if (net_send_msg(fd, MSG_HELLO, &hello, (uint32_t)sizeof(hello)) != 0) return -1;
-
-    uint16_t type = 0;
-    uint32_t len = 0;
-    if (net_recv_header(fd, &type, &len) != 0) return -1;
-    if (type != MSG_WELCOME || len != (uint32_t)sizeof(MsgWelcome)) return -1;
-
-    MsgWelcome w;
-    if (net_recv_all(fd, &w, (int)sizeof(w)) != 0) return -1;
-
-    *player_id_out = (int)ntohl((uint32_t)w.player_id);
-    return 0;
-}
-
-static int start_server_process(int port) {
+static int spawn_server_process(int port, const char *map_path, int mode, int world, int time_limit) {
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        signal(SIGHUP, SIG_IGN);
-        signal(SIGPIPE, SIG_IGN);
-        (void)setsid();
+        char pbuf[16], mbuf[16], wbuf[16], tbuf[16];
+        (void)snprintf(pbuf, sizeof(pbuf), "%d", port);
+        (void)snprintf(mbuf, sizeof(mbuf), "%d", mode);
+        (void)snprintf(wbuf, sizeof(wbuf), "%d", world);
+        (void)snprintf(tbuf, sizeof(tbuf), "%d", time_limit);
 
-        char portstr[16];
-        snprintf(portstr, sizeof(portstr), "%d", port);
+        char *argvv[8];
+        int i = 0;
+        argvv[i++] = (char *)"./server/server";
+        argvv[i++] = pbuf;
+        argvv[i++] = (char *)(map_path ? map_path : "data/map1.txt");
+        argvv[i++] = mbuf;
+        argvv[i++] = wbuf;
+        argvv[i++] = tbuf;
+        argvv[i++] = NULL;
 
-        char *argv[] = { "./server/server", portstr, NULL };
-        execv(argv[0], argv);
+        execv(argvv[0], argvv);
         _exit(127);
     }
-    return 0;
+    return 0; 
 }
 
-static void draw_status(const char *title, const char *line1, const char *line2) {
-    clear();
-    mvprintw(1, 2, "%s", title ? title : "");
-    mvprintw(3, 2, "%s", line1 ? line1 : "");
-    mvprintw(4, 2, "%s", line2 ? line2 : "");
-    mvprintw(6, 2, "q = quit");
-    refresh();
-}
-
-static int run_session(const char *host_in, int port_in, const char *player_name)
-{
-    char host[128];
-    snprintf(host, sizeof(host), "%s", host_in ? host_in : "127.0.0.1");
-    int port = port_in > 0 ? port_in : DEFAULT_PORT;
-
-    if (!player_name || player_name[0] == '\0') return -1;
-
+static int connect_and_handshake(const char *host, int port, const char *name,
+                                 int *out_fd, int *out_player_id,
+                                 MsgConfig *out_cfg, uint8_t **out_map) {
     int fd = net_connect_tcp(host, port);
-    if (fd < 0) {
-        draw_status("Error", "Connect failed", "Press any key...");
-        timeout(-1);
-        getch();
-        timeout(0);
-        return -1;
-    }
+    if (fd < 0) return -1;
 
-    int player_id = -1;
-    if (do_handshake(fd, player_name, &player_id) != 0) {
-        close(fd);
-        draw_status("Error", "Handshake failed", "Press any key...");
-        timeout(-1);
-        getch();
-        timeout(0);
-        return -1;
-    }
+    MsgHello h;
+    memset(&h, 0, sizeof(h));
+    (void)snprintf(h.name, sizeof(h.name), "%s", (name && name[0]) ? name : "player");
+    if (net_send_msg(fd, MSG_HELLO, &h, (uint32_t)sizeof(h)) != 0) { close(fd); return -1; }
 
-    g_running = 1;
-    timeout(0);
+    uint16_t t=0; uint32_t l=0;
+    if (net_recv_header(fd, &t, &l) != 0 || t != MSG_WELCOME || l != sizeof(MsgWelcome)) { close(fd); return -1; }
+    MsgWelcome w;
+    if (net_recv_all(fd, &w, (int)sizeof(w)) != 0) { close(fd); return -1; }
+    int pid = (int)ntohl(w.player_id);
 
-    long tick_ms = 0;
-    long ping_acc = 0;
+    if (net_recv_header(fd, &t, &l) != 0 || t != MSG_CONFIG || l < sizeof(MsgConfig)) { close(fd); return -1; }
 
-    while (g_running) {
-        int ch = getch();
-        if (ch == 'q' || ch == 'Q') {
-            (void)net_send_msg(fd, MSG_BYE, NULL, 0);
-            break;
-        }
+    uint8_t *buf = (uint8_t*)malloc(l);
+    if (!buf) { close(fd); return -1; }
+    if (net_recv_all(fd, buf, (int)l) != 0) { free(buf); close(fd); return -1; }
 
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(fd, &rfds);
+    MsgConfig cfg;
+    memcpy(&cfg, buf, sizeof(cfg));
 
-        struct timeval tv;
-        tv.tv_sec = 0;
-        tv.tv_usec = 50 * 1000;
+    uint16_t W = ntohs(cfg.w);
+    uint16_t H = ntohs(cfg.h);
+    uint32_t map_len = ntohl(cfg.map_len);
+    if (map_len != (uint32_t)W * (uint32_t)H) { free(buf); close(fd); return -1; }
+    if (sizeof(MsgConfig) + map_len != l) { free(buf); close(fd); return -1; }
 
-        int sel = select(fd + 1, &rfds, NULL, NULL, &tv);
-        if (sel > 0 && FD_ISSET(fd, &rfds)) {
-            uint16_t type = 0;
-            uint32_t len = 0;
-            if (net_recv_header(fd, &type, &len) != 0) {
-                draw_status("Disconnected", "recv header failed", "Press any key...");
-                timeout(-1);
-                getch();
-                timeout(0);
-                break;
-            }
+    uint8_t *map = (uint8_t*)malloc(map_len);
+    if (!map) { free(buf); close(fd); return -1; }
+    memcpy(map, buf + sizeof(MsgConfig), map_len);
+    free(buf);
 
-            if (len > 0) {
-                char *tmp = (char *)malloc(len);
-                if (!tmp) {
-                    draw_status("Error", "Out of memory", "Press any key...");
-                    timeout(-1);
-                    getch();
-                    timeout(0);
-                    break;
-                }
-                if (net_recv_all(fd, tmp, (int)len) != 0) {
-                    free(tmp);
-                    draw_status("Disconnected", "recv payload failed", "Press any key...");
-                    timeout(-1);
-                    getch();
-                    timeout(0);
-                    break;
-                }
-                free(tmp);
-            }
+    if (out_fd) *out_fd = fd;
+    if (out_player_id) *out_player_id = pid;
+    if (out_cfg) *out_cfg = cfg;
+    if (out_map) *out_map = map;
+    else free(map);
 
-            if (type == MSG_BYE) {
-                draw_status("Disconnected", "Server sent BYE", "Press any key...");
-                timeout(-1);
-                getch();
-                timeout(0);
-                break;
-            }
-        }
-
-        ping_acc += 50;
-        tick_ms += 50;
-
-        if (ping_acc >= 200) {
-            (void)net_send_msg(fd, MSG_PING, NULL, 0);
-            ping_acc = 0;
-        }
-
-        char l1[256];
-        char l2[256];
-        snprintf(l1, sizeof(l1), "Connected to %.100s:%d", host, port);
-        snprintf(l2, sizeof(l2), "name=%.32s  player_id=%d  time=%ldms", player_name, player_id, tick_ms);
-        draw_status("Session", l1, l2);
-    }
-
-    close(fd);
     return 0;
 }
 
+static void draw_game(const MsgState *st, const uint8_t *map, int my_id) {
+    int W = (int)ntohs(st->w);
+    int H = (int)ntohs(st->h);
 
-static int menu(void) {
-    clear();
-    mvprintw(1, 2, "Multiplayer Snake");
-    mvprintw(3, 2, "1) Create new game");
-    mvprintw(4, 2, "2) Join existing game");
-    mvprintw(5, 2, "q) Quit");
+    erase();
+
+    for (int y=0;y<H;y++) {
+        for (int x=0;x<W;x++) {
+            char ch = ' ';
+            if (map && map[y*W + x] == 1) ch = '#';
+            mvaddch(y, x, ch);
+        }
+    }
+
+    int nf = (int)st->num_fruits;
+    if (nf > MAX_FRUITS) nf = MAX_FRUITS;
+    for (int i=0;i<nf;i++) {
+        int fx = st->fruits[i].pos.x;
+        int fy = st->fruits[i].pos.y;
+        if (fx>=0 && fx<W && fy>=0 && fy<H) mvaddch(fy, fx, '*');
+    }
+
+    for (int i=0;i<MAX_PLAYERS;i++) {
+        const PlayerState *ps = &st->players[i];
+        if (!ps->active || !ps->alive) continue;
+
+        int len = (int)ntohs(ps->len);
+        if (len > MAX_SEGMENTS) len = MAX_SEGMENTS;
+        for (int k=0;k<len;k++) {
+            int sx = ps->body[k].x;
+            int sy = ps->body[k].y;
+            if (sx<0 || sx>=W || sy<0 || sy>=H) continue;
+            char c = (k==0) ? (i==my_id ? '@' : 'O') : (i==my_id ? 'o' : 'x');
+            mvaddch(sy, sx, c);
+        }
+    }
+
+    int hud_y = H + 1;
+    mvprintw(hud_y, 0, "WASD/Arrows=move | P=pause | Q=leave | ESC=leave");
+    mvprintw(hud_y+1, 0, "Mode=%s | Freeze=%dms | GameOver=%d",
+             st->mode ? "TIME" : "STANDARD",
+             (int)ntohs(st->global_freeze_ms),
+             (int)st->game_over);
+
+    if (st->mode == 1) {
+        mvprintw(hud_y+2, 0, "Time left: %ds", (int)ntohs(st->time_left_sec));
+    }
+
+    int row = hud_y + 3;
+    mvprintw(row++, 0, "Scores:");
+    for (int i=0;i<MAX_PLAYERS;i++) {
+        const PlayerState *ps = &st->players[i];
+        if (!ps->active && !ps->connected) continue;
+        mvprintw(row++, 0, "P%d: score=%u alive=%u paused=%u connected=%u",
+                 i,
+                 (unsigned)ntohs(ps->score),
+                 (unsigned)ps->alive,
+                 (unsigned)ps->paused,
+                 (unsigned)ps->connected);
+    }
+
     refresh();
-    nodelay(stdscr, FALSE);
-    int ch = getch();
-    nodelay(stdscr, TRUE);
-    return ch;
 }
 
-static void create_new_game(void)
-{
-    char name[64];
-
-    clear();
-    mvprintw(1, 2, "Create new game");
-
-    prompt_str(3, 2, "Player name: ", name, sizeof(name));
-
-    if (name[0] == '\0') {
-        draw_status("Error", "Name is required", "Press any key...");
-        timeout(-1);
-        getch();
-        timeout(0);
-        return;
-    }
-
-    int port = DEFAULT_PORT;
-
-    if (start_server_process(port) != 0) {
-        draw_status("Error", "Failed to start server", "Press any key...");
-        timeout(-1);
-        getch();
-        timeout(0);
-        return;
-    }
-
-    sleep_ms(200);
-
-    (void)run_session("127.0.0.1", port, name);
-}
-
-static void join_existing_game(void)
-{
-    char name[64];
-    char host[128];
-    char port_s[32];
-
-    for (;;) {
-        clear();
-        mvprintw(1, 2, "Join existing game (ESC = back)");
-
-        if (prompt_str(3, 2, "Player name: ", name, sizeof(name)) == 1) return;
-        if (prompt_str(5, 2, "Host: ", host, sizeof(host)) == 1) return;
-        if (prompt_str(7, 2, "Port: ", port_s, sizeof(port_s)) == 1) return;
-
-        if (name[0] == '\0' || host[0] == '\0' || port_s[0] == '\0') {
-            draw_status("Error", "All fields are required", "Press any key...");
-            timeout(-1); getch(); timeout(0);
-            continue;
-        }
-
-        int port = parse_port(port_s, 0);
-        if (port <= 0) {
-            draw_status("Error", "Invalid port", "Press any key...");
-            timeout(-1); getch(); timeout(0);
-            continue;
-        }
-
-        (void)run_session(host, port, name);
-        return;
+static uint8_t key_to_dir(int ch) {
+    switch (ch) {
+        case KEY_UP: return 0;
+        case KEY_RIGHT: return 1;
+        case KEY_DOWN: return 2;
+        case KEY_LEFT: return 3;
+        case 'w': case 'W': return 0;
+        case 'd': case 'D': return 1;
+        case 's': case 'S': return 2;
+        case 'a': case 'A': return 3;
+        default: return 255;
     }
 }
 
-int main(void) {
-    signal(SIGINT, on_sigint);
+static int run_game_session(const char *host, int port, const char *name) {
+    int fd = -1, my_id = -1;
+    MsgConfig cfg;
+    uint8_t *map = NULL;
+
+    if (connect_and_handshake(host, port, name, &fd, &my_id, &cfg, &map) != 0) {
+        printf("Connect/handshake failed.\n");
+        return 1;
+    }
+
+    uint16_t W = ntohs(cfg.w);
+    uint16_t H = ntohs(cfg.h);
+    uint32_t map_len = ntohl(cfg.map_len);
 
     initscr();
     cbreak();
     noecho();
     keypad(stdscr, TRUE);
+    nodelay(stdscr, TRUE);
     curs_set(0);
 
-    while (1) {
-        int ch = menu();
-        if (ch == '1') {
-            create_new_game();
-        } else if (ch == '2') {
-            join_existing_game();
-        } else if (ch == 'q' || ch == 'Q') {
-            break;
+    bool local_running = true;
+
+    while (g_running && local_running) {
+        int ch = getch();
+        if (ch != ERR) {
+            if (ch == 27 || ch == 'q' || ch == 'Q') {
+                (void)net_send_msg(fd, MSG_LEAVE, NULL, 0);
+                local_running = false;
+            } else if (ch == 'p' || ch == 'P') {
+                (void)net_send_msg(fd, MSG_PAUSE_TOGGLE, NULL, 0);
+            } else {
+                uint8_t d = key_to_dir(ch);
+                if (d != 255) {
+                    MsgInput in; in.dir = d;
+                    (void)net_send_msg(fd, MSG_INPUT, &in, (uint32_t)sizeof(in));
+                }
+            }
+        }
+
+        uint16_t t=0; uint32_t l=0;
+        if (net_recv_header(fd, &t, &l) != 0) break;
+
+        if (t == MSG_STATE && l == sizeof(MsgState)) {
+            MsgState st;
+            if (net_recv_all(fd, &st, (int)sizeof(st)) != 0) break;
+            draw_game(&st, map, my_id);
+            if (st.game_over) {
+                napms(1200);
+                local_running = false;
+            }
+        } else {
+            if (l > 0) {
+                uint8_t *tmp = (uint8_t*)malloc(l);
+                if (!tmp) break;
+                if (net_recv_all(fd, tmp, (int)l) != 0) { free(tmp); break; }
+                free(tmp);
+            }
+            if (t == MSG_BYE) break;
         }
     }
 
     endwin();
+    close(fd);
+    free(map);
+    (void)map_len;
+    (void)W;
+    (void)H;
     return 0;
 }
 
+int main(void) {
+    signal(SIGINT, on_sigint);
 
+    while (g_running) {
+        printf("\n=== Multiplayer Snake ===\n");
+        printf("1) Nova hra (spusti server, potom sa pripoji localhost)\n");
+        printf("2) Pripojit sa (zadaj host+port)\n");
+        printf("3) Koniec\n");
+
+        char choice_s[32];
+        read_line("Volba: ", choice_s, sizeof(choice_s), "3");
+        int choice = atoi(choice_s);
+
+        if (choice == 3) break;
+
+        if (choice == 1) {
+            char name[SNAKE_NAME_MAX];
+            char port_s[32];
+            char mode_s[32];
+            char world_s[32];
+            char time_s[32];
+
+            read_line("Meno hraca: ", name, sizeof(name), "player1");
+            read_line("Port (napr 5555): ", port_s, sizeof(port_s), "5555");
+            read_line("Rezim (0=standard,1=casovy): ", mode_s, sizeof(mode_s), "0");
+            read_line("Svet (0=wrap bez prekazok,1=prekazky zo suboru): ", world_s, sizeof(world_s), "1");
+            read_line("Cas limit sek (len pri mode=1): ", time_s, sizeof(time_s), "120");
+
+            int port = atoi(port_s);
+            int mode = atoi(mode_s);
+            int world = atoi(world_s);
+            int time_limit = atoi(time_s);
+
+            if (port <= 0 || port > 65535) { printf("Zly port.\n"); continue; }
+            mode = (mode == 1) ? 1 : 0;
+            world = (world == 0) ? 0 : 1;
+            time_limit = (time_limit <= 0) ? 120 : time_limit;
+
+            if (spawn_server_process(port, "data/map1.txt", mode, world, time_limit) != 0) {
+                printf("Nepodarilo sa spustit server.\n");
+                continue;
+            }
+
+            struct timespec ts;
+            ts.tv_sec = 0;
+            ts.tv_nsec = 200 * 1000000L;
+            nanosleep(&ts, NULL);
+
+            (void)run_game_session("127.0.0.1", port, name);
+
+        } else if (choice == 2) {
+            char name[SNAKE_NAME_MAX];
+            char host[128];
+            char port_s[32];
+
+            read_line("Meno hraca: ", name, sizeof(name), "playerX");
+            read_line("Host: ", host, sizeof(host), "127.0.0.1");
+            read_line("Port: ", port_s, sizeof(port_s), "5555");
+
+            int port = atoi(port_s);
+            if (port <= 0 || port > 65535) { printf("Zly port.\n"); continue; }
+
+            (void)run_game_session(host, port, name);
+        } else {
+            printf("Zla volba.\n");
+        }
+    }
+
+    return 0;
+}
 
