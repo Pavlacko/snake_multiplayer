@@ -432,6 +432,12 @@ static void *client_thread(void *arg) {
     if (g_game.game_over) { pthread_mutex_unlock(&g_game.mtx); goto done; }
 
     int ex = find_player_by_name(&g_game, h.name);
+    
+    if (ex >= 0 && g_game.players[ex].connected) {
+      pthread_mutex_unlock(&g_game.mtx);
+      goto done;
+    }
+
     if (ex >= 0) {
         slot = ex;
         g_game.players[slot].connected = true;
