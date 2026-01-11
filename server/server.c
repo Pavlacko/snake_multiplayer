@@ -56,6 +56,8 @@ typedef struct {
     uint16_t score;
     uint16_t len;
     Cell body[1024];
+    uint64_t spawn_ms;        
+    uint32_t time_ms_final; 
 } Player;
 
 typedef struct {
@@ -198,6 +200,12 @@ static void fruit_visit(Game *g, int slot, int x, int y, bool *grew) {
 
 static void kill_player(Player *p) {
     p->alive = false;
+    if (p->time_ms_final == 0 && p->spawn_ms != 0) {
+    uint64_t now = now_ms();
+    uint64_t d = (now > p->spawn_ms) ? (now - p->spawn_ms) : 0;
+    if (d > 0xFFFFFFFFULL) d = 0xFFFFFFFFULL;
+    p->time_ms_final = (uint32_t)d;
+}
 }
 
 static void move_snake(Game *g, int slot) {
@@ -302,6 +310,8 @@ static bool load_map_file(const char *path, Game *g) {
 
 static void init_player(Player *p, const char *name, Cell spawn, uint16_t keep_score) {
     memset(p, 0, sizeof(*p));
+    p->spawn_ms = now_ms();
+    p->time_ms_final = 0;
     p->used = true;
     p->connected = true;
     p->active = true;
@@ -361,8 +371,9 @@ static void build_state(Game *g, MsgState *st) {
     st->w = htons((uint16_t)g->w);
     st->h = htons((uint16_t)g->h);
     st->global_freeze_ms = htons(g->global_freeze_ms);
-
     uint64_t elapsed_ms = now_ms() - g->start_ms;
+    st->elapsed_sec = htons((uint16_t)clampi((int)(elapsed_ms / 1000ULL), 0, 65535));
+
     if (g->mode == 1) {
         uint32_t elapsed_sec = (uint32_t)(elapsed_ms / 1000ULL);
         uint32_t left = (g->time_limit_sec > elapsed_sec) ? (g->time_limit_sec - elapsed_sec) : 0;
@@ -382,6 +393,16 @@ static void build_state(Game *g, MsgState *st) {
         ps->paused = p->paused ? 1 : 0;
         ps->dir = p->dir;
         ps->score = htons(p->score);
+
+        uint64_t tms;
+        if (p->alive) {
+          uint64_t now = now_ms();
+          tms = (now > p->spawn_ms) ? (now - p->spawn_ms) : 0;
+        } else {
+          tms = (uint64_t)p->time_ms_final;
+        }
+
+ps->time_sec = htons((uint16_t)clampi((int)(tms / 1000ULL), 0, 65535));
 
         uint16_t send_len = u16min(p->len, (uint16_t)MAX_SEGMENTS);
         ps->len = htons(send_len);
@@ -624,6 +645,7 @@ int main(int argc, char **argv) {
         uint64_t dt64 = now - g_game.last_tick_ms;
         if (dt64 >= (uint64_t)g_game.tick_ms) {
             uint32_t dt = (uint32_t)dt64;
+            bool just_finished = false;
 
             pthread_mutex_lock(&g_game.mtx);
 
@@ -644,7 +666,18 @@ int main(int argc, char **argv) {
                     g_game.last_no_players_ms = 0;
                 }
             }
-
+            
+            if (just_finished) {
+              for (int i = 0; i < MAX_PLAYERS; i++) {
+                Player *p = &g_game.players[i];
+                if (!p->used) continue;
+                if (p->time_ms_final == 0 && p->spawn_ms != 0) {
+                  uint64_t d = (now > p->spawn_ms) ? (now - p->spawn_ms) : 0;
+                if (d > 0xFFFFFFFFULL) d = 0xFFFFFFFFULL;
+                  p->time_ms_final = (uint32_t)d;
+        }
+    }
+}
             if (g_running) tick_game(&g_game, dt);
 
             MsgState st;

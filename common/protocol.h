@@ -57,6 +57,7 @@ typedef struct {
     uint8_t alive;
     uint8_t paused;
     uint16_t score;
+    uint16_t time_sec;
     uint8_t dir;
     uint16_t len;
     Cell body[MAX_SEGMENTS];
@@ -74,6 +75,7 @@ typedef struct {
     uint16_t w;
     uint16_t h;
     uint16_t time_left_sec;
+    uint16_t elapsed_sec;
     uint16_t global_freeze_ms;
     uint8_t num_players;
     PlayerState players[MAX_PLAYERS];

@@ -155,26 +155,24 @@ static void draw_game(const MsgState *st, const uint8_t *map, int my_id) {
              st->mode ? "TIME" : "STANDARD",
              (int)ntohs(st->global_freeze_ms),
              (int)st->game_over);
+    
+    mvprintw(hud_y+2, 0, "Elapsed: %us", (unsigned)ntohs(st->elapsed_sec));
 
     if (st->mode == 1) {
-        mvprintw(hud_y+2, 0, "Time left: %ds", (int)ntohs(st->time_left_sec));
+    mvprintw(hud_y+3, 0, "Remaining: %us", (unsigned)ntohs(st->time_left_sec));
     }
 
-    int row = hud_y + 3;
+    int row = hud_y + (st->mode == 1 ? 4 : 3);
+
     mvprintw(row++, 0, "Scores:");
-    for (int i=0;i<MAX_PLAYERS;i++) {
+      for (int i = 0; i < MAX_PLAYERS; i++) {
         const PlayerState *ps = &st->players[i];
-        if (!ps->active && !ps->connected) continue;
-        mvprintw(row++, 0, "P%d: score=%u alive=%u paused=%u connected=%u",
-                 i,
-                 (unsigned)ntohs(ps->score),
-                 (unsigned)ps->alive,
-                 (unsigned)ps->paused,
-                 (unsigned)ps->connected);
-    }
+        if (!ps->connected) continue;
+
+    mvprintw(row++, 0, "P%d score=%u time=%us %s%s", i, (unsigned)ntohs(ps->score), (unsigned)ntohs(ps->time_sec), ps->alive ? "" : "DEAD ",ps->paused ? "PAUSED" : "");
 
     refresh();
-}
+}}
 
 static uint8_t key_to_dir(int ch) {
     switch (ch) {
@@ -237,6 +235,40 @@ static int run_game_session(const char *host, int port, const char *name) {
             MsgState st;
             if (net_recv_all(fd, &st, (int)sizeof(st)) != 0) break;
             draw_game(&st, map, my_id);
+
+        if (st.game_over) {
+            nodelay(stdscr, FALSE);
+            clear();
+            int row = 0;
+
+        mvprintw(row++, 0, "=== GAME OVER ===");
+        mvprintw(row++, 0, "Elapsed: %us", (unsigned)ntohs(st.elapsed_sec));
+        if (st.mode == 1) mvprintw(row++, 0, "Time limit reached.");
+
+        row++;
+        mvprintw(row++, 0, "Results:");
+        mvprintw(row++, 0, "----------------------------------------");
+        mvprintw(row++, 0, "PLAYER            SCORE          TIME(s)");
+        mvprintw(row++, 0, "----------------------------------------");
+
+        for (int i = 0; i < MAX_PLAYERS; i++) {
+          PlayerState *ps = &st.players[i];
+
+          if (!ps->connected && !ps->active && ntohs(ps->len) == 0 && ntohs(ps->score) == 0) continue;
+
+          mvprintw(row++, 0, "P%-9d %9u %10u", i,  (unsigned)ntohs(ps->score), (unsigned)ntohs(ps->time_sec));
+    }
+
+    row++;
+    mvprintw(row++, 0, "Press any key to return to menu...");
+    refresh();
+    getch();
+
+    nodelay(stdscr, TRUE);
+
+    local_running = false;
+    continue;
+  }
             if (st.game_over) {
                 napms(1200);
                 local_running = false;
