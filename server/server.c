@@ -14,12 +14,13 @@
 #include <sys/select.h>
 #include <time.h>
 #include <unistd.h>
+#include "server.h"
 
 #define DEFAULT_PORT 5555
 
 static volatile sig_atomic_t g_running = 1;
 
-static void on_sigint(int sig) { (void)sig; g_running = 0; }
+void on_sigint(int sig) { (void)sig; g_running = 0; }
 
 static uint64_t now_ms(void) {
     struct timespec ts;
@@ -95,9 +96,9 @@ static bool in_bounds(Game *g, int x, int y) {
 }
 
 static bool is_obstacle(Game *g, int x, int y) {
-    if (g->world == 0) return false;
     if (!in_bounds(g, x, y)) return true;
-    return g->map[idx(g, x, y)] == 1;
+    if (g->world == 0) return false;
+    return g->map[y * g->w + x] != 0;
 }
 
 static void dir_delta(uint8_t dir, int *dx, int *dy) {
@@ -172,6 +173,41 @@ static void ensure_fruits_count(Game *g) {
     }
     while (g->num_fruits > (uint8_t)needed) {
         g->num_fruits--;
+    }
+}
+
+static void gen_map(Game *g, int w, int h, int with_obstacles) {
+    g->w = w;
+    g->h = h;
+
+    free(g->map);
+    g->map = (uint8_t*)calloc((size_t)w * (size_t)h, 1);
+
+    for (int x = 0; x < w; x++) {
+        g->map[0 * w + x] = 1;
+        g->map[(h - 1) * w + x] = 1;
+    }
+    for (int y = 0; y < h; y++) {
+        g->map[y * w + 0] = 1;
+        g->map[y * w + (w - 1)] = 1;
+    }
+
+    if (!with_obstacles) {
+        return;
+    }
+
+    int cx = w / 2;
+    int cy = h / 2;
+
+    for (int y = cy - 4; y <= cy - 2; y++) {
+        for (int x = cx - 10; x <= cx - 5; x++) {
+            if (x > 0 && x < w-1 && y > 0 && y < h-1) g->map[y*w + x] = 1;
+        }
+    }
+    for (int y = cy + 2; y <= cy + 4; y++) {
+        for (int x = cx + 5; x <= cx + 10; x++) {
+            if (x > 0 && x < w-1 && y > 0 && y < h-1) g->map[y*w + x] = 1;
+        }
     }
 }
 
@@ -572,9 +608,6 @@ int main(int argc, char **argv) {
         if (port <= 0 || port > 65535) port = DEFAULT_PORT;
     }
 
-    const char *map_path = "data/map1.txt";
-    if (argc >= 3 && argv[2] && argv[2][0]) map_path = argv[2];
-
     int mode = 0;
     int world = 1;
     int time_limit = 120;
@@ -597,12 +630,24 @@ int main(int argc, char **argv) {
     g_game.global_freeze_ms = 0;
     g_game.last_no_players_ms = 0;
     g_game.game_over = false;
-    (void)snprintf(g_game.map_path, sizeof(g_game.map_path), "%s", map_path);
 
-    if (!load_map_file(map_path, &g_game)) {
-        fprintf(stderr, "Failed to load map: %s\n", map_path);
+    const char *map_arg = (argc >= 3) ? argv[2] : "-";
+
+    if (strcmp(map_arg, "-") == 0) {
+      int w = (argc >= 7) ? atoi(argv[6]) : 40;
+      int h = (argc >= 8) ? atoi(argv[7]) : 20;
+      if (w < 10) w = 10;
+      if (h < 10) h = 10;
+
+      gen_map(&g_game, w, h, (world == 1));
+      (void)snprintf(g_game.map_path, sizeof(g_game.map_path), "generated:%dx%d", w, h);
+    } else {
+      (void)snprintf(g_game.map_path, sizeof(g_game.map_path), "%s", map_arg);
+      if (!load_map_file(map_arg, &g_game)) {
+        fprintf(stderr, "Failed to load map: %s\n", map_arg);
         return 1;
     }
+}
 
     int listen_fd = net_listen_tcp(port);
     if (listen_fd < 0) {

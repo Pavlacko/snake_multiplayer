@@ -14,6 +14,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include "client.h"
 
 static volatile sig_atomic_t g_running = 1;
 
@@ -40,24 +41,33 @@ static void read_line(const char *prompt, char *out, size_t cap, const char *def
     if (out[0] == 0 && def) (void)snprintf(out, cap, "%s", def);
 }
 
-static int spawn_server_process(int port, const char *map_path, int mode, int world, int time_limit) {
+static int spawn_server_process(int port, const char *map_path, int mode, int world, int time_limit, int w, int h) {
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        char pbuf[16], mbuf[16], wbuf[16], tbuf[16];
+        char pbuf[16], mbuf[16], worldbuf[16], tbuf[16], wdim[16], hdim[16];
         (void)snprintf(pbuf, sizeof(pbuf), "%d", port);
         (void)snprintf(mbuf, sizeof(mbuf), "%d", mode);
-        (void)snprintf(wbuf, sizeof(wbuf), "%d", world);
+        (void)snprintf(worldbuf, sizeof(worldbuf), "%d", world);
         (void)snprintf(tbuf, sizeof(tbuf), "%d", time_limit);
+        (void)snprintf(wdim, sizeof(wdim), "%d", w);
+        (void)snprintf(hdim, sizeof(hdim), "%d", h);
 
-        char *argvv[8];
+        char *argvv[10];
         int i = 0;
+
         argvv[i++] = (char *)"./server/server";
         argvv[i++] = pbuf;
         argvv[i++] = (char *)(map_path ? map_path : "data/map1.txt");
         argvv[i++] = mbuf;
-        argvv[i++] = wbuf;
+        argvv[i++] = worldbuf;
         argvv[i++] = tbuf;
+
+        if (map_path && strcmp(map_path, "-") == 0) {
+          argvv[i++] = wdim;
+          argvv[i++] = hdim;
+        }
+
         argvv[i++] = NULL;
 
         execv(argvv[0], argvv);
@@ -66,9 +76,7 @@ static int spawn_server_process(int port, const char *map_path, int mode, int wo
     return 0; 
 }
 
-static int connect_and_handshake(const char *host, int port, const char *name,
-                                 int *out_fd, int *out_player_id,
-                                 MsgConfig *out_cfg, uint8_t **out_map) {
+static int connect_and_handshake(const char *host, int port, const char *name, int *out_fd, int *out_player_id, MsgConfig *out_cfg, uint8_t **out_map) {
     int fd = net_connect_tcp(host, port);
     if (fd < 0) return -1;
 
@@ -150,7 +158,7 @@ static void draw_game(const MsgState *st, const uint8_t *map, int my_id) {
     }
 
     int hud_y = H + 1;
-    mvprintw(hud_y, 0, "WASD/Arrows=move | P=pause | Q=leave | ESC=leave");
+    mvprintw(hud_y, 0, "WASD/Arrows=move | P=pause | Q=leave");
     mvprintw(hud_y+1, 0, "Mode=%s | Freeze=%dms | GameOver=%d",
              st->mode ? "TIME" : "STANDARD",
              (int)ntohs(st->global_freeze_ms),
@@ -188,7 +196,7 @@ static uint8_t key_to_dir(int ch) {
     }
 }
 
-static int run_game_session(const char *host, int port, const char *name) {
+int run_game_session(const char *host, int port, const char *name) {
     int fd = -1, my_id = -1;
     MsgConfig cfg;
     uint8_t *map = NULL;
@@ -248,31 +256,32 @@ static int run_game_session(const char *host, int port, const char *name) {
         row++;
         mvprintw(row++, 0, "Results:");
         mvprintw(row++, 0, "----------------------------------------");
-        mvprintw(row++, 0, "PLAYER            SCORE          TIME(s)");
+        mvprintw(row++, 0, "%-6s %8s %10s", "PLAYER", "SCORE", "TIME(s)");
         mvprintw(row++, 0, "----------------------------------------");
 
         for (int i = 0; i < MAX_PLAYERS; i++) {
           PlayerState *ps = &st.players[i];
 
           if (!ps->connected && !ps->active && ntohs(ps->len) == 0 && ntohs(ps->score) == 0) continue;
-
-          mvprintw(row++, 0, "P%-9d %9u %10u", i,  (unsigned)ntohs(ps->score), (unsigned)ntohs(ps->time_sec));
+          char player_label[8];
+          snprintf(player_label, sizeof(player_label), "P%d", i);
+          mvprintw(row++, 0, "%-6s %8u %8u", player_label,  (unsigned)ntohs(ps->score), (unsigned)ntohs(ps->time_sec));
     }
 
-    row++;
-    mvprintw(row++, 0, "Press any key to return to menu...");
-    refresh();
-    getch();
+        row++;
+        mvprintw(row++, 0, "Press any key to return to menu...");
+        refresh();
+        getch();
 
-    nodelay(stdscr, TRUE);
+        nodelay(stdscr, TRUE);
 
-    local_running = false;
-    continue;
-  }
-            if (st.game_over) {
-                napms(1200);
-                local_running = false;
-            }
+        local_running = false;
+        continue;
+      }
+        if (st.game_over) {
+            napms(1200);
+            local_running = false;
+        }
         } else {
             if (l > 0) {
                 uint8_t *tmp = (uint8_t*)malloc(l);
@@ -298,12 +307,12 @@ int main(void) {
 
     while (g_running) {
         printf("\n=== Multiplayer Snake ===\n");
-        printf("1) Nova hra (spusti server, potom sa pripoji localhost)\n");
-        printf("2) Pripojit sa (zadaj host+port)\n");
-        printf("3) Koniec\n");
+        printf("1) New game\n");
+        printf("2) Connect\n");
+        printf("3) Quit\n");
 
         char choice_s[32];
-        read_line("Volba: ", choice_s, sizeof(choice_s), "3");
+        read_line("Option: ", choice_s, sizeof(choice_s), "3");
         int choice = atoi(choice_s);
 
         if (choice == 3) break;
@@ -315,28 +324,36 @@ int main(void) {
             char world_s[32];
             char time_s[32];
 
-            read_line("Meno hraca: ", name, sizeof(name), "player1");
-            read_line("Port (napr 5555): ", port_s, sizeof(port_s), "5555");
-            read_line("Rezim (0=standard,1=casovy): ", mode_s, sizeof(mode_s), "0");
-            read_line("Svet (0=wrap bez prekazok,1=prekazky bez wrapu): ", world_s, sizeof(world_s), "1");
-            read_line("Cas limit sek (len pri mode=1): ", time_s, sizeof(time_s), "120");
+            read_line("Port (exmp. 5555): ", port_s, sizeof(port_s), "5555");
+            read_line("Mode (0=standard,1=time): ", mode_s, sizeof(mode_s), "0");
+            read_line("World (0=wrap, without obstacles,1=obstacles, no wrap): ", world_s, sizeof(world_s), "0");
+            read_line("Time limit sec (only mode=1): ", time_s, sizeof(time_s), "120");
 
             int port = atoi(port_s);
             int mode = atoi(mode_s);
             int world = atoi(world_s);
             int time_limit = atoi(time_s);
-
-            if (port <= 0 || port > 65535) { printf("Nespravny port.\n"); continue; }
+            
+            int w = 40, h = 20;
+            if (world == 0) {
+              char w_s[16], h_s[16];
+              read_line("Map width (exmp 40): ", w_s, sizeof(w_s), "40");
+              read_line("Map height (exmp 20): ", h_s, sizeof(h_s), "20");
+              w = atoi(w_s);
+              h = atoi(h_s);
+              if (w < 10) w = 10;
+              if (h < 10) h = 10;
+            }
+            
+            if (port <= 0 || port > 65535) { printf("Incorrect port.\n"); continue; }
             mode = (mode == 1) ? 1 : 0;
             world = (world == 0) ? 0 : 1;
             time_limit = (time_limit <= 0) ? 120 : time_limit;
 
-            const char *map_path = (world == 0)
-            ? "data/map1.txt" 
-            : "data/map2.txt";  
+            const char *map_path = (world == 0) ? "-" : "data/map1.txt";  
 
-            if (spawn_server_process(port, map_path, mode, world, time_limit) != 0) {
-              printf("Nepodarilo sa spustit server.\n");
+            if (spawn_server_process(port, map_path, mode, world, time_limit, w, h) != 0) {
+              printf("Failed to start the server.\n");
               continue;
             }
 
@@ -352,16 +369,15 @@ int main(void) {
             char host[128];
             char port_s[32];
 
-            read_line("Meno hraca: ", name, sizeof(name), "playerX");
             read_line("Host: ", host, sizeof(host), "127.0.0.1");
             read_line("Port: ", port_s, sizeof(port_s), "5555");
 
             int port = atoi(port_s);
-            if (port <= 0 || port > 65535) { printf("Zly port.\n"); continue; }
+            if (port <= 0 || port > 65535) { printf("Wrong input.\n"); continue; }
 
             (void)run_game_session(host, port, name);
         } else {
-            printf("Zla volba.\n");
+            printf("Wrong option.\n");
         }
     }
 

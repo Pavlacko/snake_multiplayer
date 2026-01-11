@@ -35,7 +35,7 @@ int net_recv_all(int fd, void *buf, int len) {
             if (errno == EINTR) continue;
             return -1;
         }
-        if (n == 0) return -1; // peer closed
+        if (n == 0) return -1; 
         recvd += n;
     }
     return 0;
