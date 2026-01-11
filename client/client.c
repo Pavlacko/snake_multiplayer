@@ -286,7 +286,7 @@ int main(void) {
             read_line("Meno hraca: ", name, sizeof(name), "player1");
             read_line("Port (napr 5555): ", port_s, sizeof(port_s), "5555");
             read_line("Rezim (0=standard,1=casovy): ", mode_s, sizeof(mode_s), "0");
-            read_line("Svet (0=wrap bez prekazok,1=prekazky zo suboru): ", world_s, sizeof(world_s), "1");
+            read_line("Svet (0=wrap bez prekazok,1=prekazky bez wrapu): ", world_s, sizeof(world_s), "1");
             read_line("Cas limit sek (len pri mode=1): ", time_s, sizeof(time_s), "120");
 
             int port = atoi(port_s);
@@ -294,14 +294,18 @@ int main(void) {
             int world = atoi(world_s);
             int time_limit = atoi(time_s);
 
-            if (port <= 0 || port > 65535) { printf("Zly port.\n"); continue; }
+            if (port <= 0 || port > 65535) { printf("Nespravny port.\n"); continue; }
             mode = (mode == 1) ? 1 : 0;
             world = (world == 0) ? 0 : 1;
             time_limit = (time_limit <= 0) ? 120 : time_limit;
 
-            if (spawn_server_process(port, "data/map1.txt", mode, world, time_limit) != 0) {
-                printf("Nepodarilo sa spustit server.\n");
-                continue;
+            const char *map_path = (world == 0)
+            ? "data/map1.txt" 
+            : "data/map2.txt";  
+
+            if (spawn_server_process(port, map_path, mode, world, time_limit) != 0) {
+              printf("Nepodarilo sa spustit server.\n");
+              continue;
             }
 
             struct timespec ts;

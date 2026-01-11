@@ -93,6 +93,7 @@ static bool in_bounds(Game *g, int x, int y) {
 }
 
 static bool is_obstacle(Game *g, int x, int y) {
+    if (g->world == 0) return false;
     if (!in_bounds(g, x, y)) return true;
     return g->map[idx(g, x, y)] == 1;
 }
@@ -157,15 +158,6 @@ static int count_active_alive(Game *g) {
     return c;
 }
 
-static uint32_t mask_active_alive(Game *g) {
-    uint32_t m=0;
-    for (int i=0;i<MAX_PLAYERS;i++) {
-        Player *p=&g->players[i];
-        if (p->used && p->active && p->alive) m |= (1u<<i);
-    }
-    return m;
-}
-
 static void ensure_fruits_count(Game *g) {
     int needed = count_active_alive(g);
     if (needed < 0) needed = 0;
@@ -181,21 +173,24 @@ static void ensure_fruits_count(Game *g) {
     }
 }
 
+static void clear_fruit_visits_for_slot(Game *g, int slot) {
+    if (slot < 0 || slot >= MAX_PLAYERS) return;
+    uint32_t mask = ~(1u << (uint32_t)slot);
+    for (int i = 0; i < g->num_fruits; i++) {
+        g->fruits[i].visited_mask &= mask;
+    }
+}
+
 static void fruit_visit(Game *g, int slot, int x, int y, bool *grew) {
-    uint32_t need_mask = mask_active_alive(g);
-    for (int i=0;i<(int)g->num_fruits;i++) {
-        Fruit *f=&g->fruits[i];
+    for (int i = 0; i < (int)g->num_fruits; i++) {
+        Fruit *f = &g->fruits[i];
         if (f->pos.x == x && f->pos.y == y) {
-            uint32_t before = f->visited_mask;
-            f->visited_mask |= (1u<<slot);
-            if (before != f->visited_mask) {
-                *grew = true;
-                g->players[slot].score++;
-            }
-            if ((f->visited_mask & need_mask) == need_mask) {
-                f->pos = find_free_cell(g);
-                f->visited_mask = 0;
-            }
+            *grew = true;
+            g->players[slot].score++;
+
+            f->pos = find_free_cell(g);
+            f->visited_mask = 0;
+
             return;
         }
     }
@@ -447,6 +442,7 @@ static void *client_thread(void *arg) {
             Cell sp = find_free_cell(&g_game);
             init_player(&g_game.players[slot], g_game.players[slot].name, sp, keep);
             g_game.players[slot].fd = fd;
+            clear_fruit_visits_for_slot(&g_game, slot);
         }
         g_game.global_freeze_ms = 3000;
     } else {
@@ -525,6 +521,11 @@ done:
             g_game.players[i].connected = false;
             g_game.players[i].ready = false;
             g_game.players[i].fd = -1;
+            if (!g_game.players[i].active) {
+              g_game.players[i].used = false;
+              g_game.players[i].name[0] = '\0';
+            }
+
             break;
         }
     }
